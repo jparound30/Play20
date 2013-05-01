@@ -29,6 +29,55 @@ trait PlayReloader {
       var currentProducts = Map.empty[java.io.File, Long]
       var currentAnalysis = Option.empty[sbt.inc.Analysis]
 
+      def isExistJDKWatchService = {
+        try {
+          Class.forName("java.nio.file.WatchService")
+          println(play.console.Colors.green(
+            """|Using WatchService""".stripMargin
+          ))
+          true
+        } catch {
+          case e: ClassNotFoundException =>
+            false
+          case e: Throwable =>
+            println(play.console.Colors.red(
+              """|
+                 |Cannot find java.nio.file.WatchService (%s)
+                 |Fallback to using jnotify for checking file changes.
+                 |""".format(e.getMessage).stripMargin
+            ))
+            false
+        }
+      }
+
+      import java.nio.file.FileSystems
+      import java.nio.file.WatchService
+      import java.nio.file.Paths
+      import java.nio.file.StandardWatchEventKinds._
+
+      abstract class WatchDescriptor
+      case class WatchServiceDescriptor(id: WatchKey) extends WatchDescriptor
+      case class JNotifyDescriptoy(id: Int) extends WatchDescriptor
+
+      // WatchService ( for JDK7+ )
+      lazy val watchService = {
+
+        val watcher: WatchService = FileSystems.getDefault.newWatchService
+        var _changed = false
+        val nativeWatcher = new {
+          def addWatch(directoryToWatch: String): WatchDescriptor = {
+            val path = Paths.get(directoryToWatch)
+            path.register(watcher, ENTRY_CREATE, ENTRY_DELETE, ENTRY_MODIFY)
+          }
+          def removeWatch(id: WatchDescriptor): Unit = {
+          }
+          def reloaded() { _changed = false }
+          def changed() { _changed = true }
+          def hasChanged = _changed
+        }
+      }
+      lazy val fileChangeDetector = if (isExistJDKWatchService) watchService else jnotify
+
       // --- USING jnotify to detect file change (TODO: Use Java 7 standard API if available)
 
       lazy val jnotify = { // This create a fully dynamic version of JNotify that support reloading 
@@ -83,10 +132,10 @@ trait PlayReloader {
           })
 
           val nativeWatcher = new {
-            def addWatch(directoryToWatch: String): Int = {
-              addWatchMethod.invoke(null, directoryToWatch, 15: java.lang.Integer, true: java.lang.Boolean, listener).asInstanceOf[Int]
+            def addWatch(directoryToWatch: String): WatchDescriptor = {
+              WatchDescriptor(addWatchMethod.invoke(null, directoryToWatch, 15: java.lang.Integer, true: java.lang.Boolean, listener).asInstanceOf[Int])
             }
-            def removeWatch(id: Int): Unit = removeWatchMethod.invoke(null, id.asInstanceOf[AnyRef])
+            def removeWatch(id: WatchDescriptor): Unit = removeWatchMethod.invoke(null, id.asInstanceOf[AnyRef])
             def reloaded() { _changed = false }
             def changed() { _changed = true }
             def hasChanged = _changed
@@ -107,8 +156,8 @@ trait PlayReloader {
             ))
 
             new {
-              def addWatch(directoryToWatch: String): Int = 0
-              def removeWatch(id: Int): Unit = ()
+            def addWatch(directoryToWatch: String): Watch = 0
+              def removeWatch(id: WatchDescriptor): Unit = ()
               def reloaded(): Unit = ()
               def changed(): Unit = ()
               def hasChanged = true
